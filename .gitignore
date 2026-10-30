@@ -12,6 +12,7 @@ dist/
 
 # Ajustes locales de Claude Code
 .claude/settings.local.json
+.claude/worktrees/
 
 # Sistema
 .DS_Store
