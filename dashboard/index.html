@@ -49,7 +49,7 @@ th:first-child, td:first-child { text-align: left; }
 <body>
 <main>
   <h1>Confort térmico — <span id="vivienda"></span></h1>
-  <p class="sub">Comparación de escenarios contra el caso base según ASHRAE 55 (adaptativo). Solo extremos: temperatura operativa máxima y mínima del punto central de la vivienda.</p>
+  <p class="sub">Comparación de escenarios contra el caso base según ASHRAE 55 (adaptativo). Temperatura operativa del punto central de la vivienda, tal como la entrega el simulador (un valor por periodo); la exterior se muestra con máximo y mínimo.</p>
   <div class="aviso" id="fuente">Cargando datos…</div>
 
   <div class="filtros">
@@ -80,8 +80,8 @@ th:first-child, td:first-child { text-align: left; }
     </section>
 
     <section class="card">
-      <h2>Rango de temperatura operativa</h2>
-      <p class="nota">Barra = de T_op mínima a máxima. Marcas = límites ASHRAE 55 en esas horas.</p>
+      <h2>Temperatura operativa vs. ASHRAE 55</h2>
+      <p class="nota" id="nota-rango"></p>
       <div class="chart"><canvas id="c-rango"></canvas></div>
     </section>
 
@@ -93,7 +93,7 @@ th:first-child, td:first-child { text-align: left; }
 
     <section class="card full">
       <h2>Mes a mes: <span id="titulo-mensual"></span></h2>
-      <p class="nota">Líneas continuas = escenario elegido; punteadas = caso base. Franja = rango aceptable ASHRAE 55.</p>
+      <p class="nota">Línea continua = escenario elegido; discontinua = caso base; punteadas = T exterior máx/mín. Franja = rango aceptable ASHRAE 55.</p>
       <div class="chart"><canvas id="c-mensual"></canvas></div>
     </section>
   </div>
@@ -108,7 +108,7 @@ const fmt = (v, d = 1) => v == null || isNaN(v) ? "—" : v.toLocaleString("es-M
 const signo = (v, d = 1) => v == null || isNaN(v) ? "—" : (v > 0 ? "+" : "") + fmt(v, d);
 
 let todas = [], filas = [], escenarios = [], colores = {}, charts = {};
-const REQUERIDAS = ["vivienda_id", "escenario_id", "escenario_nombre", "es_base", "periodo", "T_op_max_C", "T_op_min_C"];
+const REQUERIDAS = ["vivienda_id", "escenario_id", "escenario_nombre", "es_base", "periodo", "T_operativa_C"];
 
 // Une todos los CSV (cada archivo = salida de backend/generar_csv_confort.py).
 // Una fila se identifica por vivienda × escenario × periodo; si se repite, gana el último archivo (orden alfabético).
@@ -171,20 +171,24 @@ function pintar() {
 function tabla(per) {
   const rs = escenarios.map(e => fila(e, per)).filter(Boolean);
   const r0 = rs[0];
-  document.getElementById("nota-tabla").textContent = per === "anual" ? "Todo el año." :
-    `${per === "mes_caliente" ? "Mes caliente" : "Mes frío"}: ${MES_NOMBRE[r0?.mes] ?? "?"} (según el clima). T exterior ${fmt(r0?.T_ext_min_C)} a ${fmt(r0?.T_ext_max_C)} °C.`;
-  // verde = mejora contra el base, rojo = empeora; siempre con signo, nunca solo color
-  const cls = (v, menorEsMejor = true) => v == null || isNaN(v) || v === 0 ? "" : ((v < 0) === menorEsMejor ? "mejor" : "peor");
+  const ext = `T exterior ${fmt(r0?.T_ext_min_C)} a ${fmt(r0?.T_ext_max_C)} °C.`;
+  document.getElementById("nota-tabla").textContent = per === "anual"
+    ? `Todo el año. ${ext} El año no tiene límite propio: exceso y déficit son los del peor mes.`
+    : `${per === "mes_caliente" ? "Mes caliente" : "Mes frío"}: ${MES_NOMBRE[r0?.mes] ?? "?"} (según el clima). ${ext}`;
+  // verde = mejora contra el base, rojo = empeora; siempre con signo, nunca solo color.
+  // ΔT_op no se colorea: subir la temperatura es bueno en frío y malo en calor.
+  const cls = v => v == null || isNaN(v) || v === 0 ? "" : (v < 0 ? "mejor" : "peor");
+  const lim = r => r.limite_inf_C == null ? "—" : `${fmt(r.limite_inf_C)} – ${fmt(r.limite_sup_C)}`;
   document.getElementById("tabla").innerHTML = `
-    <tr><th>Escenario</th><th>T_op máx °C</th><th>Δ vs base</th><th>T_op mín °C</th><th>Δ vs base</th>
-    <th>Exceso máx °C</th><th>Déficit máx °C</th><th>HR máx %</th><th>HR mín %</th>
+    <tr><th>Escenario</th><th>T_op °C</th><th>Δ vs base</th><th>Límites ASHRAE °C</th>
+    <th>Exceso °C</th><th>Déficit °C</th><th>HR %</th>
     <th>Energía kWh</th><th>Δ energía</th><th>Carbono kgCO₂e</th></tr>` +
     rs.map(r => `<tr>
       <td><span class="dot" style="background:${colores[r.escenario_id]}"></span>${r.escenario_id} — ${r.escenario_nombre}${esBase(r.escenario_id) ? " (base)" : ""}</td>
-      <td>${fmt(r.T_op_max_C)}</td><td class="${cls(r.delta_T_op_max_C)}">${signo(r.delta_T_op_max_C)}</td>
-      <td>${fmt(r.T_op_min_C)}</td><td class="${cls(r.delta_T_op_min_C, false)}">${signo(r.delta_T_op_min_C)}</td>
-      <td>${fmt(r.max_exceso_sobre_limite_C)}</td><td>${fmt(r.max_deficit_bajo_limite_C)}</td>
-      <td>${fmt(r.HR_max_pct, 0)}</td><td>${fmt(r.HR_min_pct, 0)}</td>
+      <td>${fmt(r.T_operativa_C)}</td><td>${signo(r.delta_T_operativa_C)}</td><td>${lim(r)}</td>
+      <td class="${r.exceso_sobre_limite_C > 0 ? "peor" : ""}">${fmt(r.exceso_sobre_limite_C)}</td>
+      <td class="${r.deficit_bajo_limite_C > 0 ? "peor" : ""}">${fmt(r.deficit_bajo_limite_C)}</td>
+      <td>${fmt(r.HR_pct, 0)}</td>
       <td>${fmt(r.energia_total_kWh, 0)}</td><td class="${cls(r.delta_energia_pct)}">${signo(r.delta_energia_pct, 0)} %</td>
       <td>${fmt(r.carbono_kgCO2e, 0)}</td></tr>`).join("");
 }
@@ -204,22 +208,23 @@ function nuevo(id, cfg) { charts[id]?.destroy(); charts[id] = new Chart(document
 function rango(per) {
   const rs = escenarios.map(e => fila(e, per)).filter(Boolean);
   const labels = rs.map(r => r.escenario_id);
+  document.getElementById("nota-rango").textContent = per === "anual"
+    ? "Punto = T_op anual del simulador. El año no tiene franja ASHRAE: cada mes tiene la suya (ver mes a mes)."
+    : "Franja = rango aceptable ASHRAE 55 del mes. Punto = T_op del simulador.";
   const o = base();
   o.indexAxis = "y";
   o.scales.x.title = { display: true, text: "T operativa (°C)", color: css("--ink-2") };
-  const vals = rs.flatMap(r => [r.T_op_min_C, r.T_op_max_C, r.limite_inf_C, r.limite_sup_C]).filter(v => v != null && !isNaN(v));
+  const vals = rs.flatMap(r => [r.T_operativa_C, r.limite_inf_C, r.limite_sup_C]).filter(v => v != null && !isNaN(v));
   o.scales.x.min = Math.floor(Math.min(...vals) - 2); o.scales.x.max = Math.ceil(Math.max(...vals) + 2);
-  o.plugins.legend.labels.filter = i => !i.text.startsWith("Límite inf");
+  o.plugins.legend.display = false;
   o.plugins.tooltip = { callbacks: { label: c => c.dataset.type === "scatter"
-      ? `${c.dataset.label}: ${fmt(c.raw.x)} °C`
-      : `T_op: ${fmt(c.raw[0])} a ${fmt(c.raw[1])} °C` } };
+      ? `T_op: ${fmt(c.raw.x)} °C`
+      : `ASHRAE 55: ${fmt(c.raw[0])} a ${fmt(c.raw[1])} °C` } };
   nuevo("c-rango", { type: "bar", data: { labels, datasets: [
-    { label: "T_op mín → máx", data: rs.map(r => [r.T_op_min_C, r.T_op_max_C]),
-      backgroundColor: rs.map(r => colores[r.escenario_id]), borderRadius: 4, borderSkipped: false, barThickness: 14 },
-    { type: "scatter", label: "Límites ASHRAE 55", data: rs.map(r => ({ x: r.limite_sup_C, y: r.escenario_id })),
-      pointStyle: "line", rotation: 90, radius: 11, borderWidth: 3, borderColor: css("--ink"), backgroundColor: css("--ink") },
-    { type: "scatter", label: "Límite inf. ASHRAE", data: rs.map(r => ({ x: r.limite_inf_C, y: r.escenario_id })),
-      pointStyle: "line", rotation: 90, radius: 11, borderWidth: 3, borderColor: css("--ink"), backgroundColor: css("--ink") }
+    { type: "scatter", label: "T_op", data: rs.map(r => ({ x: r.T_operativa_C, y: r.escenario_id })),
+      backgroundColor: rs.map(r => colores[r.escenario_id]), borderColor: css("--surface"), borderWidth: 2, radius: 8, hoverRadius: 10 },
+    { label: "Rango ASHRAE 55", data: rs.map(r => r.limite_inf_C == null ? null : [r.limite_inf_C, r.limite_sup_C]),
+      backgroundColor: css("--band"), borderRadius: 4, borderSkipped: false, barThickness: 18 }
   ] }, options: o });
 }
 
@@ -228,12 +233,12 @@ function tradeoff(per) {
   const o = base();
   o.plugins.legend.display = true;
   o.scales.x.title = { display: true, text: "Energía total (kWh)", color: css("--ink-2") };
-  o.scales.y.title = { display: true, text: "Exceso + déficit máx (°C)", color: css("--ink-2") };
+  o.scales.y.title = { display: true, text: "Exceso + déficit (°C)", color: css("--ink-2") };
   o.scales.y.beginAtZero = true; o.scales.x.beginAtZero = true;
   o.plugins.tooltip = { callbacks: { label: c => { const r = rs[c.datasetIndex];
-    return [`${r.escenario_id} — ${r.escenario_nombre}`, `Exceso ${fmt(r.max_exceso_sobre_limite_C)} °C · Déficit ${fmt(r.max_deficit_bajo_limite_C)} °C`, `Energía ${fmt(r.energia_total_kWh, 0)} kWh`]; } } };
+    return [`${r.escenario_id} — ${r.escenario_nombre}`, `Exceso ${fmt(r.exceso_sobre_limite_C)} °C · Déficit ${fmt(r.deficit_bajo_limite_C)} °C`, `Energía ${fmt(r.energia_total_kWh, 0)} kWh`]; } } };
   nuevo("c-tradeoff", { type: "scatter", data: { datasets: rs.map(r => ({
-    label: r.escenario_id, data: [{ x: r.energia_total_kWh, y: (r.max_exceso_sobre_limite_C || 0) + (r.max_deficit_bajo_limite_C || 0) }],
+    label: r.escenario_id, data: [{ x: r.energia_total_kWh, y: (r.exceso_sobre_limite_C || 0) + (r.deficit_bajo_limite_C || 0) }],
     backgroundColor: colores[r.escenario_id], borderColor: css("--surface"), borderWidth: 2, radius: 7, hoverRadius: 9 })) }, options: o });
 }
 
@@ -249,12 +254,12 @@ function mensual(e) {
   const ds = [
     { label: "Rango ASHRAE 55", data: serie(e, "limite_sup_C"), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: css("--band") },
     { label: "Límite inf. ASHRAE", data: serie(e, "limite_inf_C"), borderColor: "transparent", pointRadius: 0, fill: false },
-    { label: "T_op máx", data: serie(e, "T_op_max_C"), borderColor: col, backgroundColor: col, borderWidth: 2, pointRadius: 3 },
-    { label: "T_op mín", data: serie(e, "T_op_min_C"), borderColor: col, backgroundColor: col, borderWidth: 2, pointRadius: 3, pointStyle: "rectRot" },
+    { label: "T_op", data: serie(e, "T_operativa_C"), borderColor: col, backgroundColor: col, borderWidth: 2, pointRadius: 3 },
+    { label: "T ext. máx", data: serie(e, "T_ext_max_C"), borderColor: css("--axis"), borderDash: [2, 3], borderWidth: 1.5, pointRadius: 0 },
+    { label: "T ext. mín", data: serie(e, "T_ext_min_C"), borderColor: css("--axis"), borderDash: [2, 3], borderWidth: 1.5, pointRadius: 0 },
   ];
   if (eb && eb !== e) ds.push(
-    { label: "Base máx", data: serie(eb, "T_op_max_C"), borderColor: gris, borderDash: [5, 4], borderWidth: 2, pointRadius: 0 },
-    { label: "Base mín", data: serie(eb, "T_op_min_C"), borderColor: gris, borderDash: [5, 4], borderWidth: 2, pointRadius: 0 });
+    { label: "Base", data: serie(eb, "T_operativa_C"), borderColor: gris, borderDash: [6, 4], borderWidth: 2, pointRadius: 0 });
   o.plugins.legend.labels.filter = i => !i.text.startsWith("Límite inf");
   nuevo("c-mensual", { type: "line", data: { labels: MESES, datasets: ds }, options: o });
 }

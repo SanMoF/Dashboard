@@ -6,26 +6,26 @@ Proyecto de becario dentro del proyecto SECIHTI de descarbonización de vivienda
 
 ## Qué hace
 
-1. **Backend (`backend/`)**: toma los resultados horarios de la simulación de cada escenario y genera **un CSV por vivienda** con los indicadores de confort.
+1. **Backend (`backend/`)**: toma los resultados del simulador de cada escenario (un valor por mes) y genera **un CSV por vivienda** con los indicadores de confort.
 2. **Datos (`datos/`)**: aquí se guardan esos CSV. El dashboard lee **todos** los `.csv` de esta carpeta, sin importar cuántos sean ni de cuántas viviendas.
 3. **Dashboard (`dashboard/`)**: página web que muestra, por vivienda:
    - una tabla con cada escenario frente al caso base,
-   - el rango de temperatura operativa (mínima a máxima) frente a los límites de ASHRAE 55,
+   - la temperatura operativa de cada escenario frente a la franja aceptable de ASHRAE 55,
    - el *tradeoff* confort contra energía,
    - la evolución mes a mes del escenario elegido frente al base.
 
 ## Cómo lo hace
 
-- **Una vivienda = una zona.** La simulación entrega la temperatura y la humedad operativas de **un punto central de la casa**, lejos de los muros, para idealizar la temperatura de toda la vivienda.
-- **ASHRAE 55, método adaptativo, siempre.** Con la temperatura exterior de los días previos se calcula, para cada hora, el rango aceptable de temperatura (banda de 80 % o 90 % de aceptabilidad; el límite superior sube si hay movimiento de aire).
-- **Solo extremos.** No se cuentan horas: para el año, el mes más caliente, el mes más frío y cada mes se reportan la T operativa **máxima y mínima**, el límite ASHRAE en esas horas, cuánto se pasa de él (exceso/déficit) y la humedad máxima y mínima.
-- **Comparación contra el base.** Cada escenario trae la diferencia contra el caso base en T máxima, T mínima y energía.
+- **Una vivienda = una zona.** Un simulador preciso, alimentado con los parámetros de cada escenario, entrega la temperatura operativa y la humedad de **un punto central de la casa**, lejos de los muros, como **un valor por mes** (y uno anual). El script no calcula ni resume la temperatura operativa: la toma tal cual.
+- **Solo el clima exterior lleva máximo y mínimo.** La T operativa y la humedad son un solo valor por periodo.
+- **ASHRAE 55, método adaptativo, siempre.** Con la temperatura exterior media del mes se calcula el rango aceptable de ese mes (banda de 80 % o 90 % de aceptabilidad; el límite superior sube si hay movimiento de aire) y cuánto se sale de él la T operativa (exceso/déficit). El año no tiene límite propio: su exceso/déficit es el del peor mes.
+- **Comparación contra el base.** Cada escenario trae la diferencia contra el caso base en T operativa y energía.
 - **No inventa datos.** Si falta un dato, la celda queda vacía y se anota en un log (`<archivo>_log.md`).
 
 Una fila del CSV = escenario × periodo (15 filas por escenario). Documentación detallada:
 
 - [`docs/metodologia_calculo.md`](docs/metodologia_calculo.md): **todas las fórmulas** (ASHRAE 55 adaptativo), paso a paso, con un ejemplo numérico, supuestos y limitaciones. Las fórmulas están escritas en el propio script; la única librería de confort, `pythermalcomfort`, solo se usa para verificarlas (`python backend/pruebas/validar_ashrae55.py`).
-- [`docs/contexto_esquema_confort.md`](docs/contexto_esquema_confort.md): las 34 columnas y el historial de decisiones del esquema.
+- [`docs/contexto_esquema_confort.md`](docs/contexto_esquema_confort.md): las 30 columnas y el historial de decisiones del esquema.
 
 ## Estructura
 
@@ -82,18 +82,20 @@ python backend/mock/crear_mock.py --vivienda PUE-03 --ajuste-clima 1
 python backend/generar_csv_confort.py \
   --escenarios backend/mock/entradas/PUE-03/escenarios.csv \
   --config backend/mock/entradas/PUE-03/config.csv \
+  --clima backend/mock/entradas/PUE-03/clima.csv \
   --salida datos/confort_PUE-03_mock.csv
 ```
 
 Recarga el dashboard y aparecerá la vivienda `PUE-03`.
 
-Con datos reales necesitas tres tipos de archivo (el formato completo está al inicio de `backend/generar_csv_confort.py`):
+Con datos reales necesitas cuatro tipos de archivo (el formato completo está al inicio de `backend/generar_csv_confort.py`):
 
 | Archivo | Quién lo llena | Contenido |
 |---|---|---|
-| `escenarios.csv` | a mano | un renglón por escenario: id, nombre, si es el base, archivo horario y los 9 parámetros de la medida (U de muro/techo/ventana, SHGC, absortancias, sombreado, ventilación, velocidad del aire) |
+| `escenarios.csv` | a mano | un renglón por escenario: id, nombre, si es el base, archivo de resultados y los 9 parámetros de la medida (U de muro/techo/ventana, SHGC, absortancias, sombreado, ventilación, velocidad del aire) |
 | `config.csv` | a mano | `vivienda_id`, `aceptabilidad_pct` (80 o 90) y, si se tienen, factor de emisión y COP/eficiencias |
-| `horario_<escenario>.csv` | simulación | por hora: `fecha_hora`, `T_operativa_C` del punto central (o `T_aire_C` + `T_radiante_media_C`), `HR_pct`, `T_exterior_C` (o se pasa un `--epw`), energía de enfriamiento y calefacción |
+| `resultados_<escenario>.csv` | simulador | una fila por mes (`mes` = 1–12) y, si se tiene, una fila `anual`: `T_operativa_C` del punto central, `HR_pct`, energía de enfriamiento y calefacción |
+| `clima.csv` (o un `--epw`) | clima | por mes: `T_ext_max_C`, `T_ext_min_C`, `T_ext_media_C` |
 
 Revisa siempre el `_log.md` que se genera junto al CSV: dice qué quedó vacío y qué dato hace falta.
 

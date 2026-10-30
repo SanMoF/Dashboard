@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Crea entradas MOCK (datos inventados, no reales) para probar generar_csv_confort.py.
+Hace las veces del simulador: un modelo horario burdo que se resume a un valor por mes
+(y uno anual), como lo entregaría el simulador real.
 Uso: python crear_mock.py [--vivienda PUE-01] [--ajuste-clima 0]
-Escribe en backend/mock/entradas/<vivienda>/ (escenarios.csv, config.csv, horario_*.csv)."""
+Escribe en backend/mock/entradas/<vivienda>/ (escenarios.csv, config.csv, clima.csv, resultados_*.csv)."""
 import argparse, os
 import numpy as np
 import pandas as pd
@@ -37,26 +39,34 @@ ESC = [
 ]
 filas = []
 for eid, nom, base, um, ut, uv, shgc, am, at, som, ach, v in ESC:
-    ganancia = (um * 0.9 + ut * 1.6 + uv * 0.5) * 0.35  # sensibilidad inventada a la envolvente
-    sol_g = sol * (am * 3 + at * 4 + shgc * 6 * (1 - som * 0.3))
-    inercia = pd.Series(te).rolling(6, min_periods=1).mean().values
-    ta0 = 0.55 * inercia + 0.45 * 29 + sol_g * 0.7 + (ganancia - 1.2) * (te - 21) * 0.15
-    ta = ta0 - 0.12 * (ach - 0.5) * np.clip(ta0 - te, 0, None)  # la ventilación acerca el interior al exterior
-    tr = ta + 0.4 * sol_g * 0.3 - 0.2
+    # balance burdo inventado: interior = exterior (media 24 h) + ganancias / conductancia de la envolvente
+    G = um + 1.2 * ut + 0.3 * uv + 0.35 * ach                      # conductancia relativa (ventilar acopla al exterior)
+    q_sol = sol * (am * 3 + at * 4 + shgc * 6 * (1 - som * 0.3))   # ganancia solar relativa
+    te24 = pd.Series(te).rolling(24, min_periods=1).mean().values
+    ta = te24 + 8 * (q_sol + 3) / (G + 4) + np.clip(0.08 * G, 0.2, 0.7) * (te - te24)
+    tr = ta + 0.04 * q_sol * ut - 0.2
     # cargas ideales mock: enfría sobre 26 °C, calienta bajo 18 °C (escala ~3 MWh/año en la base)
-    enf = np.clip(ta - 26, 0, None) * 0.14 * (1 + 0.2 * ganancia)
-    cal = np.clip(18 - ta, 0, None) * 0.09 * (1 + 0.2 * ganancia)
-    arch = f"horario_{eid}.csv"
-    pd.DataFrame({"fecha_hora": t, "T_aire_C": ta.round(2), "T_radiante_media_C": tr.round(2),
-                  "HR_pct": np.clip(18 + 0.6 * hre - 1.0 * (ta - 22), 15, 95).round(1), "vel_aire_m_s": v,
-                  "T_exterior_C": te.round(2),
-                  "energia_enfriamiento_kWh": enf.round(3), "energia_calefaccion_kWh": cal.round(3)}
-                 ).to_csv(os.path.join(d, arch), index=False)
+    enf = np.clip(ta - 26, 0, None) * 0.16 * (1 + 0.1 * G)
+    cal = np.clip(18 - ta, 0, None) * 0.11 * (1 + 0.1 * G)
+    h = pd.DataFrame({"mes": t.month, "T_operativa_C": 0.5 * ta + 0.5 * tr,
+                      "HR_pct": np.clip(18 + 0.6 * hre - 1.0 * (ta - 22), 15, 95),
+                      "energia_enfriamiento_kWh": enf, "energia_calefaccion_kWh": cal})
+    # salida tipo simulador: un valor por mes y uno anual (T_op y HR medias, energía sumada)
+    agg = {"T_operativa_C": "mean", "HR_pct": "mean", "energia_enfriamiento_kWh": "sum", "energia_calefaccion_kWh": "sum"}
+    res = h.groupby("mes").agg(agg)
+    res.loc["anual"] = h.agg(agg)
+    arch = f"resultados_{eid}.csv"
+    res.round({"T_operativa_C": 2, "HR_pct": 1, "energia_enfriamiento_kWh": 1, "energia_calefaccion_kWh": 1}
+              ).reset_index().to_csv(os.path.join(d, arch), index=False)
     filas.append([eid, nom, base, arch, um, ut, uv, shgc, am, at, som, ach, v])
-pd.DataFrame(filas, columns=["escenario_id", "escenario_nombre", "es_base", "archivo_horario", "U_muro_ext", "U_techo",
+pd.DataFrame(filas, columns=["escenario_id", "escenario_nombre", "es_base", "archivo_resultados", "U_muro_ext", "U_techo",
     "U_ventana", "SHGC_ventana", "absortancia_muro", "absortancia_techo", "sombreado_m", "ventilacion_ach", "vel_aire_m_s"]
     ).to_csv(os.path.join(d, "escenarios.csv"), index=False)
+g = pd.Series(te).groupby(t.month)
+clima = pd.DataFrame({"T_ext_max_C": g.max(), "T_ext_min_C": g.min(), "T_ext_media_C": g.mean()})
+clima.loc["anual"] = [te.max(), te.min(), te.mean()]
+clima.round(2).rename_axis("mes").reset_index().to_csv(os.path.join(d, "clima.csv"), index=False)
 open(os.path.join(d, "config.csv"), "w").write(
     f"clave,valor\nvivienda_id,{args.vivienda}\naceptabilidad_pct,80\n"
-    "factor_emision_kgCO2e_kWh,0.435\ndias_media_exterior,7\nenergia_tipo,electrica\n")
+    "factor_emision_kgCO2e_kWh,0.435\nenergia_tipo,electrica\n")
 print("Mock listo en", d)

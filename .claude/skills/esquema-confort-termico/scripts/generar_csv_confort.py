@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-generar_csv_confort.py — Esquema de datos de confort térmico (v3: solo máximos y mínimos)
+generar_csv_confort.py — Esquema de datos de confort térmico (v9: T_op del simulador por periodo)
 Genera el CSV único para el dashboard a partir de archivos dados. No inventa
 valores: lo que no está en las entradas queda vacío y se anota en el log.
 La vivienda es una sola zona (sin habitaciones) y el confort siempre se mide con
-ASHRAE 55 adaptativo. No se cuentan horas: se reportan los extremos de T_op
-(máx y mín), el límite ASHRAE vigente en esas horas y cuánto se pasan de él.
-Una fila por escenario × periodo.
+ASHRAE 55 adaptativo. La temperatura operativa NO se calcula aquí ni se reduce a
+máximos/mínimos: la entrega un simulador (alimentado con los parámetros de cada
+escenario) como un valor por mes. Solo la temperatura exterior se reporta con
+máximo y mínimo. Una fila por escenario × periodo.
 
 Entradas
-  --escenarios  CSV: escenario_id, escenario_nombre, es_base, archivo_horario,
+  --escenarios  CSV: escenario_id, escenario_nombre, es_base, archivo_resultados,
                 [U_muro_ext, U_techo, U_ventana, SHGC_ventana, absortancia_muro,
                  absortancia_techo, sombreado_m, ventilacion_ach, vel_aire_m_s]
   --config      CSV clave,valor: vivienda_id, aceptabilidad_pct (80|90),
-                [factor_emision_kgCO2e_kWh, dias_media_exterior,
-                 energia_tipo (electrica|termica), COP_enfriamiento,
-                 eficiencia_calefaccion]
-  --epw         (opcional) archivo de clima; si falta, el horario debe traer
-                T_exterior_C
-  Horario por escenario (archivo_horario): fecha_hora y la temperatura
-                operativa del PUNTO CENTRAL de la vivienda (lejos de los muros, para
-                reducir la varianza): T_operativa_C, o bien T_aire_C y
-                T_radiante_media_C (el script calcula T_op). Opcionales:
-                [HR_pct, vel_aire_m_s, T_exterior_C,
-                energia_enfriamiento_kWh, energia_calefaccion_kWh].
-                Una fila por hora, de toda la vivienda.
+                [factor_emision_kgCO2e_kWh, energia_tipo (electrica|termica),
+                 COP_enfriamiento, eficiencia_calefaccion]
+  --epw         archivo de clima horario, o bien
+  --clima       CSV mensual: mes, T_ext_max_C, T_ext_min_C, T_ext_media_C
+                (fila 'anual' opcional)
+  Resultados del simulador por escenario (archivo_resultados): una fila por mes
+                (mes = 1–12 o ene–dic) y, opcional, una fila mes = anual, con la
+                temperatura operativa del PUNTO CENTRAL de la vivienda:
+                T_operativa_C. Opcionales: [HR_pct, energia_enfriamiento_kWh,
+                energia_calefaccion_kWh].
 Salidas
   --salida CSV final y <salida>_log.md con faltantes, supuestos y avisos.
 """
@@ -35,15 +34,15 @@ import pandas as pd
 PARAMS = ["U_muro_ext", "U_techo", "U_ventana", "SHGC_ventana", "absortancia_muro",
           "absortancia_techo", "sombreado_m", "ventilacion_ach", "vel_aire_m_s"]
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+DIAS_MES = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 COLUMNAS = (
     ["vivienda_id", "escenario_id", "escenario_nombre", "es_base"] + PARAMS +
     ["nivel", "periodo", "mes",
-     "T_ext_max_C", "T_ext_min_C",
-     "T_op_max_C", "T_op_min_C", "mes_T_op_max", "mes_T_op_min",
-     "HR_max_pct", "HR_min_pct",
-     "limite_sup_C", "limite_inf_C", "max_exceso_sobre_limite_C", "max_deficit_bajo_limite_C",
+     "T_ext_max_C", "T_ext_min_C", "T_ext_media_C",
+     "T_operativa_C", "HR_pct",
+     "limite_sup_C", "limite_inf_C", "exceso_sobre_limite_C", "deficit_bajo_limite_C",
      "energia_total_kWh", "carbono_kgCO2e",
-     "delta_T_op_max_C", "delta_T_op_min_C", "delta_energia_pct",
+     "delta_T_operativa_C", "delta_energia_pct",
      "aceptabilidad_pct"])
 
 LOG = {"faltantes": [], "supuestos": [], "avisos": []}
@@ -59,6 +58,16 @@ def num(x):
     except (TypeError, ValueError):
         return np.nan
 
+def mes_num(x):
+    """1–12 a partir de '1'…'12' o 'ene'…'dic'; 'anual' se conserva; otro valor → None."""
+    s = str(x).strip().lower()
+    if s == "anual":
+        return "anual"
+    if s[:3] in MESES:
+        return MESES.index(s[:3]) + 1
+    n = num(s)
+    return int(n) if not np.isnan(n) and 1 <= n <= 12 else None
+
 def leer_config(path):
     df = pd.read_csv(path, dtype=str).fillna("")
     cfg = {r["clave"].strip(): r["valor"].strip() for _, r in df.iterrows()}
@@ -73,68 +82,51 @@ def leer_epw(path):
     fh = pd.to_datetime(dict(year=yr, month=rows[1], day=rows[2], hour=rows[3] - 1))
     return pd.DataFrame({"fecha_hora": fh, "T_exterior_C": rows[6].astype(float)})
 
-def a_coef(v):
-    """ASHRAE 55 apéndice: peso A de T_aire en T_operativa según velocidad del aire."""
-    return np.where(np.isnan(v) | (v < 0.2), 0.5, np.where(v < 0.6, 0.6, 0.7))
+def leer_clima(a):
+    """Clima por periodo (índice 1–12 y 'anual'): T_ext_max_C, T_ext_min_C, T_ext_media_C."""
+    cols = ["T_ext_max_C", "T_ext_min_C", "T_ext_media_C"]
+    if a.epw:
+        e = leer_epw(a.epw)
+        g = e.groupby(e["fecha_hora"].dt.month)["T_exterior_C"]
+        c = pd.DataFrame({"T_ext_max_C": g.max(), "T_ext_min_C": g.min(), "T_ext_media_C": g.mean()})
+        c.loc["anual"] = [e["T_exterior_C"].max(), e["T_exterior_C"].min(), e["T_exterior_C"].mean()]
+        return c
+    if not a.clima:
+        sys.exit("Sin --epw ni --clima: no se puede aplicar ASHRAE 55 adaptativo")
+    c = pd.read_csv(a.clima, dtype={"mes": str})
+    c.index = c["mes"].map(mes_num)
+    c = c[c.index.notna()].reindex(columns=cols).astype(float)
+    for k in cols:
+        if c[k].isna().all():
+            log("faltantes", f"clima: falta '{k}'")
+    faltan = [MESES[m - 1] for m in range(1, 13) if m not in c.index]
+    if faltan:
+        log("faltantes", f"clima: sin datos para {', '.join(faltan)}")
+    if "anual" not in c.index:
+        m = c.drop(index="anual", errors="ignore").reindex(range(1, 13))
+        media = np.nan if m["T_ext_media_C"].isna().any() else float(np.average(m["T_ext_media_C"], weights=DIAS_MES))
+        c.loc["anual"] = [m["T_ext_max_C"].max(), m["T_ext_min_C"].min(), media]
+        log("supuestos", "clima anual: máx/mín de los meses y media ponderada por días de cada mes")
+    return c
 
 def extra_vel(v):
     """Aumento del límite superior adaptativo por velocidad del aire (ASHRAE 55, escalones)."""
     return np.where(np.isnan(v), 0.0, np.where(v >= 1.2, 2.2, np.where(v >= 0.9, 1.8, np.where(v >= 0.6, 1.2, 0.0))))
 
-def clima_diario(ext, cfg):
-    """Media exterior diaria y media predominante (media simple de N días previos)."""
-    d = ext.set_index("fecha_hora")["T_exterior_C"].resample("D").mean().dropna()
-    n_cfg = num(cfg.get("dias_media_exterior"))
-    n = 7 if np.isnan(n_cfg) else int(n_cfg)
-    if np.isnan(n_cfg):
-        log("supuestos", f"dias_media_exterior no dado: se usa {n} días (rango ASHRAE 55: 7–30)")
-    if len(d) >= 365:  # año completo: los primeros días toman los últimos del año (año típico)
-        ext_d = pd.concat([d.iloc[-n:], d])
-        tpma = ext_d.shift(1).rolling(n).mean().iloc[n:]
-        log("supuestos", "media predominante de los primeros días de enero calculada con los últimos días de diciembre (año típico)")
-    else:
-        tpma = d.shift(1).rolling(n).mean()
-        log("avisos", "periodo menor a un año: los primeros días no tienen media predominante y se excluyen")
-    return tpma
-
-def evaluar(hor, ext, tpma, cfg):
-    """Agrega T_op y los límites ASHRAE 55 a cada hora del horario."""
-    acept = num(cfg.get("aceptabilidad_pct"))
+def limites(tpma, t_op, v, acept):
+    """Límites ASHRAE 55 adaptativos (inf, sup); NaN si falta un dato o tpma sale de 10–33.5 °C."""
+    if np.isnan(acept) or np.isnan(tpma) or not 10 <= tpma <= 33.5:
+        return np.nan, np.nan
     banda = 2.5 if acept == 90 else 3.5
-    if np.isnan(acept):
-        log("faltantes", "aceptabilidad_pct no dada: no se calculan límites de confort")
-    h = hor.copy()
-    h["mes"] = h["fecha_hora"].dt.month
-    if "T_exterior_C" not in h or h["T_exterior_C"].isna().all():
-        h = h.drop(columns=[c for c in ["T_exterior_C"] if c in h]).merge(ext, on="fecha_hora", how="left")
-    v = h["vel_aire_m_s"].astype(float).values if "vel_aire_m_s" in h else np.full(len(h), np.nan)
-    if "vel_aire_m_s" not in h:
-        log("supuestos", "sin vel_aire_m_s horaria: sin ajuste por velocidad del aire" + ("" if "T_operativa_C" in h else " y T_operativa con A=0.5"))
-    if "T_operativa_C" in h:
-        h["T_op"] = h["T_operativa_C"].astype(float)
-    else:
-        A = a_coef(v)
-        h["T_op"] = A * h["T_aire_C"] + (1 - A) * h["T_radiante_media_C"]
-    h["tpma"] = h["fecha_hora"].dt.normalize().map(tpma)
-    t_conf = 0.31 * h["tpma"] + 17.8
-    valida = (h["tpma"] >= 10) & (h["tpma"] <= 33.5)
-    h["lim_inf"] = np.where(valida, t_conf - banda, np.nan)
-    h["lim_sup"] = np.where(valida, t_conf + banda + np.where(h["T_op"] > 25, extra_vel(v), 0), np.nan)
-    if np.isnan(acept):
-        h["lim_inf"] = h["lim_sup"] = np.nan
-    fuera = int((~valida & h["tpma"].notna()).sum())
-    if fuera:
-        log("avisos", f"{fuera} horas con media predominante fuera de 10–33.5 °C: fuera del alcance del método adaptativo, sin límites ni exceso/déficit")
-    h["exceso"] = np.clip(h["T_op"] - h["lim_sup"], 0, None)
-    h["deficit"] = np.clip(h["lim_inf"] - h["T_op"], 0, None)
-    return h
+    t_conf = 0.31 * tpma + 17.8
+    return t_conf - banda, t_conf + banda + (float(extra_vel(np.float64(v))) if t_op > 25 else 0.0)
 
 def energia_total(df, cfg):
-    """Serie horaria de energía total (kWh); convierte carga térmica solo con COP dado. None si no se puede."""
+    """Energía total (kWh) por fila; convierte carga térmica solo con COP dado. None si no se puede."""
     enf = df["energia_enfriamiento_kWh"].astype(float) if "energia_enfriamiento_kWh" in df else None
     cal = df["energia_calefaccion_kWh"].astype(float) if "energia_calefaccion_kWh" in df else None
     if enf is None and cal is None:
-        log("faltantes", "el horario no trae energía: columnas de energía y carbono vacías")
+        log("faltantes", "los resultados no traen energía: columnas de energía y carbono vacías")
         return None
     tipo = cfg.get("energia_tipo", "").lower()
     if tipo == "termica":
@@ -148,22 +140,11 @@ def energia_total(df, cfg):
         log("avisos", "config sin energia_tipo: se usa la energía tal como la entrega el simulador")
     return (enf if enf is not None else 0) + (cal if cal is not None else 0)
 
-def agregar(h, periodo_meses):
-    x = h[h["mes"].isin(periodo_meses)]
-    if x.empty:
-        return None
-    imax, imin = x["T_op"].idxmax(), x["T_op"].idxmin()
-    return {"T_op_max_C": x.loc[imax, "T_op"], "T_op_min_C": x.loc[imin, "T_op"],
-            "mes_T_op_max": int(x.loc[imax, "mes"]), "mes_T_op_min": int(x.loc[imin, "mes"]),
-            "limite_sup_C": x.loc[imax, "lim_sup"], "limite_inf_C": x.loc[imin, "lim_inf"],
-            "HR_max_pct": x["HR_pct"].max() if "HR_pct" in x else np.nan,
-            "HR_min_pct": x["HR_pct"].min() if "HR_pct" in x else np.nan,
-            "max_exceso_sobre_limite_C": x["exceso"].max(), "max_deficit_bajo_limite_C": x["deficit"].max()}
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--escenarios", required=True)
-    ap.add_argument("--config", required=True); ap.add_argument("--epw")
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--epw"); ap.add_argument("--clima")
     ap.add_argument("--salida", required=True)
     a = ap.parse_args()
     base_dir = os.path.dirname(os.path.abspath(a.escenarios))
@@ -177,56 +158,82 @@ def main():
     factor = num(cfg.get("factor_emision_kgCO2e_kWh"))
     if np.isnan(factor):
         log("faltantes", "factor_emision_kgCO2e_kWh no dado: carbono vacío")
-    ext_epw = leer_epw(a.epw) if a.epw else None
+    acept = num(cfg.get("aceptabilidad_pct"))
+    if np.isnan(acept):
+        log("faltantes", "aceptabilidad_pct no dada: no se calculan límites de confort")
+
+    clima = leer_clima(a)
+    log("supuestos", "media exterior predominante = media exterior mensual (tope de 30 días de ASHRAE 55), "
+                     "porque el simulador entrega un valor de T_operativa por mes")
+    tm = clima.loc[[m for m in range(1, 13) if m in clima.index], "T_ext_media_C"].dropna()
+    fuera = [MESES[m - 1] for m, t in tm.items() if not 10 <= t <= 33.5]
+    if fuera:
+        log("avisos", f"media exterior fuera de 10–33.5 °C en {', '.join(fuera)}: fuera del alcance del método adaptativo, sin límites ni exceso/déficit")
+    if tm.empty:
+        log("faltantes", "sin T_ext_media_C mensual: no se identifican mes caliente ni mes frío")
+    clave = [("anual", "anual")] + ([("mes_caliente", int(tm.idxmax())), ("mes_frio", int(tm.idxmin()))] if len(tm) else [])
 
     filas = []
     for _, s in esc.iterrows():
-        ruta = s["archivo_horario"] if os.path.isabs(s["archivo_horario"]) else os.path.join(base_dir, s["archivo_horario"])
-        if not s["archivo_horario"] or not os.path.exists(ruta):
-            log("faltantes", f"{s['escenario_id']}: no existe archivo_horario '{s['archivo_horario']}' — escenario sin resultados")
+        arch = s.get("archivo_resultados", "")
+        ruta = arch if os.path.isabs(arch) else os.path.join(base_dir, arch)
+        if not arch or not os.path.exists(ruta):
+            log("faltantes", f"{s['escenario_id']}: no existe archivo_resultados '{arch}' — escenario sin resultados")
             continue
-        hor = pd.read_csv(ruta)
-        hor["fecha_hora"] = pd.to_datetime(hor["fecha_hora"])
-        if ext_epw is not None:
-            hor["fecha_hora"] = hor["fecha_hora"].apply(lambda t: t.replace(year=2001))
-        if "T_operativa_C" not in hor:
-            for c in ["T_aire_C", "T_radiante_media_C"]:
-                if c not in hor:
-                    sys.exit(f"{ruta}: falta T_operativa_C o, en su lugar, {c}")
-        if "HR_pct" not in hor:
-            log("faltantes", f"{s['escenario_id']}: el horario no trae HR_pct: HR_max_pct y HR_min_pct vacías")
-        if hor["fecha_hora"].duplicated().any():
-            log("avisos", f"{s['escenario_id']}: fecha_hora repetida en el horario; debe haber una sola serie para toda la vivienda")
-        if ext_epw is not None:
-            ext = ext_epw
-        elif "T_exterior_C" in hor:
-            ext = hor[["fecha_hora", "T_exterior_C"]]
-        else:
-            sys.exit("Sin EPW ni T_exterior_C en el horario: no se puede aplicar ASHRAE 55 adaptativo")
-        tpma = clima_diario(ext, cfg)
-        h = evaluar(hor, ext, tpma, cfg)
-        ext = ext.assign(mes=ext["fecha_hora"].dt.month)
-        mens = ext.groupby("mes")["T_exterior_C"].mean()
-        m_cal, m_fri = int(mens.idxmax()), int(mens.idxmin())
-        en = energia_total(hor, cfg)
-        mes_h = hor["fecha_hora"].dt.month
-        periodos = [("clave", "anual", list(range(1, 13)), None), ("clave", "mes_caliente", [m_cal], m_cal),
-                    ("clave", "mes_frio", [m_fri], m_fri)] + [("mes", MESES[m - 1], [m], m) for m in range(1, 13)]
+        res = pd.read_csv(ruta, dtype={"mes": str})
+        res.index = res["mes"].map(mes_num)
+        if res.index.isna().any():
+            log("avisos", f"{s['escenario_id']}: filas con 'mes' no reconocido (se ignoran)")
+            res = res[res.index.notna()]
+        if res.index.duplicated().any():
+            log("avisos", f"{s['escenario_id']}: mes repetido en los resultados; se usa la primera fila (debe haber un solo valor por mes para toda la vivienda)")
+            res = res[~res.index.duplicated()]
+        for c in ["T_operativa_C", "HR_pct"]:
+            if c not in res:
+                log("faltantes", f"{s['escenario_id']}: los resultados no traen {c}: columna vacía")
+                res[c] = np.nan
+        faltan = [MESES[m - 1] for m in range(1, 13) if m not in res.index]
+        if faltan:
+            log("faltantes", f"{s['escenario_id']}: sin resultados para {', '.join(faltan)}")
+        en = energia_total(res, cfg)
+        val = lambda k, c: float(res.at[k, c]) if k in res.index and pd.notna(res.at[k, c]) else np.nan
+        cli = lambda k, c: float(clima.at[k, c]) if k in clima.index else np.nan
+        v = num(s.get("vel_aire_m_s", ""))
+
+        def periodo(k):
+            top = val(k, "T_operativa_C")
+            r = {c: cli(k, c) for c in ["T_ext_max_C", "T_ext_min_C", "T_ext_media_C"]}
+            r.update(T_operativa_C=top, HR_pct=val(k, "HR_pct"),
+                     energia_total_kWh=float(en[k]) if en is not None and k in en.index and pd.notna(en[k]) else np.nan)
+            if k != "anual":
+                li, ls = limites(r["T_ext_media_C"], top, v, acept)
+                r.update(limite_inf_C=li, limite_sup_C=ls,
+                         exceso_sobre_limite_C=np.clip(top - ls, 0, None), deficit_bajo_limite_C=np.clip(li - top, 0, None))
+            return r
+
+        mensual = {m: periodo(m) for m in range(1, 13)}
+        anual = periodo("anual")
+        if np.isnan(anual["T_operativa_C"]):
+            log("faltantes", f"{s['escenario_id']}: el simulador no da T_operativa anual: queda vacía (no se promedian meses)")
+        e_mes = [mensual[m]["energia_total_kWh"] for m in range(1, 13)]
+        if not np.isnan(e_mes).any():
+            anual["energia_total_kWh"] = sum(e_mes)
+        # año: sin límite propio (cada mes tiene el suyo); exceso/déficit = el del peor mes,
+        # vacío si falta la T_op de algún mes (el peor podría ser justo ese)
+        completo = not any(np.isnan(mensual[m]["T_operativa_C"]) for m in range(1, 13))
+        if not completo:
+            log("faltantes", f"{s['escenario_id']}: falta la T_operativa de algún mes: exceso/déficit y energía anuales vacíos")
+        for c in ["exceso_sobre_limite_C", "deficit_bajo_limite_C"]:
+            xs = [mensual[m][c] for m in range(1, 13) if not np.isnan(mensual[m][c])]
+            anual[c] = max(xs) if xs and completo else np.nan
         comunes = {"vivienda_id": cfg.get("vivienda_id", ""), "escenario_id": s["escenario_id"],
                    "escenario_nombre": s["escenario_nombre"], "es_base": s["es_base"],
-                   **{p: num(s.get(p, "")) for p in PARAMS},
-                   "aceptabilidad_pct": num(cfg.get("aceptabilidad_pct"))}
-        for nivel, per, meses, mes in periodos:
-            xe = ext[ext["mes"].isin(meses)]
-            r = agregar(h, meses)
-            if r is None:
-                log("faltantes", f"{s['escenario_id']}: sin datos horarios para {per}")
-                continue
-            e_tot = en[mes_h.isin(meses)].sum() if en is not None else np.nan
-            r.update(T_ext_max_C=xe["T_exterior_C"].max(), T_ext_min_C=xe["T_exterior_C"].min(),
-                     energia_total_kWh=e_tot, carbono_kgCO2e=e_tot * factor)
-            r.update(comunes, nivel=nivel, periodo=per, mes=mes if mes else "")
-            filas.append(r)
+                   **{p: num(s.get(p, "")) for p in PARAMS}, "aceptabilidad_pct": acept}
+        periodos = [("clave", per, anual if k == "anual" else mensual[k], "" if k == "anual" else k) for per, k in clave] + \
+                   [("mes", MESES[m - 1], mensual[m], m) for m in range(1, 13)]
+        for nivel, per, r, mes in periodos:
+            filas.append({**r, **comunes, "nivel": nivel, "periodo": per, "mes": mes,
+                          "carbono_kgCO2e": r["energia_total_kWh"] * factor})
     if not filas:
         sys.exit("Sin filas generadas: revisar el log")
     df = pd.DataFrame(filas).reindex(columns=COLUMNAS)
@@ -235,15 +242,13 @@ def main():
     if len(b):
         k = list(df["periodo"])
         g = lambda c: np.array([b[c].get(i, np.nan) for i in k], dtype=float)
-        df["delta_T_op_max_C"] = df["T_op_max_C"] - g("T_op_max_C")
-        df["delta_T_op_min_C"] = df["T_op_min_C"] - g("T_op_min_C")
+        df["delta_T_operativa_C"] = df["T_operativa_C"] - g("T_operativa_C")
         with np.errstate(divide="ignore", invalid="ignore"):
             be = g("energia_total_kWh")
             df["delta_energia_pct"] = np.where(be > 0, 100 * (df["energia_total_kWh"] - be) / be, np.nan)
     num_cols = df.select_dtypes("number").columns
     df[num_cols] = df[num_cols].round(2)
-    for c in ["mes", "mes_T_op_max", "mes_T_op_min"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+    df["mes"] = pd.to_numeric(df["mes"], errors="coerce").astype("Int64")
     df.to_csv(a.salida, index=False, encoding="utf-8")
     with open(os.path.splitext(a.salida)[0] + "_log.md", "w", encoding="utf-8") as f:
         f.write(f"# Log de generación — {os.path.basename(a.salida)}\n\n")
