@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Entradas mock generadas (pesadas; se recrean con backend/mock/crear_mock.py)
+backend/mock/entradas/
+
+# Paquete de la skill (se genera con herramientas/empaquetar_skill.py)
+dist/
+
+# Ajustes locales de Claude Code
+.claude/settings.local.json
+
+# Sistema
+.DS_Store
+Thumbs.db

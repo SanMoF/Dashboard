@@ -1,0 +1,3 @@
+-r requirements.txt
+# solo para backend/pruebas/validar_ashrae55.py (probado con 4.7.0)
+pythermalcomfort>=4.0

@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Confort térmico PUE-01</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+:root {
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --band: rgba(27, 175, 122, .12);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --good: #006300; --bad: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --band: rgba(25, 158, 112, .18);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --good: #0ca30c; --bad: #e66767;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 2px; }
+.sub { color: var(--ink-2); margin: 0 0 16px; }
+.nota { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+.filtros { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }
+.filtros label { display: flex; flex-direction: column; font-size: 12px; color: var(--ink-2); gap: 4px; }
+select, input[type=file], button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 6px 8px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--grid); border-radius: 10px; padding: 16px; min-width: 0; }
+.full { grid-column: 1 / -1; }
+.chart { position: relative; height: 300px; }
+.tabla { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--grid); text-align: right; white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; font-size: 12px; }
+th:first-child, td:first-child { text-align: left; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.mejor { color: var(--good); } .peor { color: var(--bad); }
+.aviso { background: var(--surface); border: 1px dashed var(--axis); border-radius: 8px; padding: 8px 12px; color: var(--ink-2); font-size: 12px; }
+@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Confort térmico — <span id="vivienda"></span></h1>
+  <p class="sub">Comparación de escenarios contra el caso base según ASHRAE 55 (adaptativo). Solo extremos: temperatura operativa máxima y mínima del punto central de la vivienda.</p>
+  <div class="aviso" id="fuente">Cargando datos…</div>
+
+  <div class="filtros">
+    <label>Vivienda
+      <select id="sel-vivienda"></select>
+    </label>
+    <label>Periodo
+      <select id="periodo">
+        <option value="anual">Año</option>
+        <option value="mes_caliente">Mes caliente</option>
+        <option value="mes_frio">Mes frío</option>
+      </select>
+    </label>
+    <label>Escenario (gráfica mensual)
+      <select id="escenario"></select>
+    </label>
+    <button id="recargar" type="button">Recargar datos/</button>
+    <label>Abrir CSV sin servidor
+      <input type="file" id="archivo" accept=".csv" multiple>
+    </label>
+  </div>
+
+  <div class="grid">
+    <section class="card full">
+      <h2>Resumen por escenario</h2>
+      <p class="nota" id="nota-tabla"></p>
+      <div class="tabla"><table id="tabla"></table></div>
+    </section>
+
+    <section class="card">
+      <h2>Rango de temperatura operativa</h2>
+      <p class="nota">Barra = de T_op mínima a máxima. Marcas = límites ASHRAE 55 en esas horas.</p>
+      <div class="chart"><canvas id="c-rango"></canvas></div>
+    </section>
+
+    <section class="card">
+      <h2>Tradeoff: confort vs energía</h2>
+      <p class="nota">Abajo a la izquierda es mejor: menos grados fuera de ASHRAE 55 y menos energía.</p>
+      <div class="chart"><canvas id="c-tradeoff"></canvas></div>
+    </section>
+
+    <section class="card full">
+      <h2>Mes a mes: <span id="titulo-mensual"></span></h2>
+      <p class="nota">Líneas continuas = escenario elegido; punteadas = caso base. Franja = rango aceptable ASHRAE 55.</p>
+      <div class="chart"><canvas id="c-mensual"></canvas></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
+const MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const MES_NOMBRE = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+const fmt = (v, d = 1) => v == null || isNaN(v) ? "—" : v.toLocaleString("es-MX", { minimumFractionDigits: d, maximumFractionDigits: d });
+const signo = (v, d = 1) => v == null || isNaN(v) ? "—" : (v > 0 ? "+" : "") + fmt(v, d);
+
+let todas = [], filas = [], escenarios = [], colores = {}, charts = {};
+const REQUERIDAS = ["vivienda_id", "escenario_id", "escenario_nombre", "es_base", "periodo", "T_op_max_C", "T_op_min_C"];
+
+// Une todos los CSV (cada archivo = salida de backend/generar_csv_confort.py).
+// Una fila se identifica por vivienda × escenario × periodo; si se repite, gana el último archivo (orden alfabético).
+function cargar(archivos, origen) {
+  const avisos = [], mapa = new Map(), repetidas = new Set();
+  for (const { nombre, texto } of archivos) {
+    const d = Papa.parse(texto.trim(), { header: true, dynamicTyping: true, skipEmptyLines: true }).data;
+    const falta = REQUERIDAS.filter(c => !d.length || !(c in d[0]));
+    if (falta.length) { avisos.push(`${nombre}: se omite (faltan columnas: ${falta.join(", ")})`); continue; }
+    for (const r of d) {
+      const k = [r.vivienda_id, r.escenario_id, r.periodo].join("|");
+      if (mapa.has(k)) repetidas.add(`${r.vivienda_id}/${r.escenario_id}`);
+      mapa.set(k, r);
+    }
+  }
+  if (repetidas.size) avisos.push(`Escenarios repetidos entre archivos (se usa el último): ${[...repetidas].join(", ")}`);
+  todas = [...mapa.values()];
+  document.getElementById("fuente").innerHTML = [origen, ...avisos].map(t => `<div>${t}</div>`).join("");
+  const viviendas = [...new Set(todas.map(r => r.vivienda_id))];
+  const sv = document.getElementById("sel-vivienda"), previa = sv.value;
+  sv.innerHTML = viviendas.map(v => `<option>${v}</option>`).join("");
+  if (viviendas.includes(previa)) sv.value = previa;
+  if (!viviendas.length) { document.getElementById("vivienda").textContent = "sin datos"; return; }
+  seleccionar(sv.value);
+}
+
+function seleccionar(v) {
+  filas = todas.filter(r => r.vivienda_id === v);
+  escenarios = [...new Set(filas.map(r => r.escenario_id))];
+  // el color sigue al escenario (orden del archivo), nunca a su posición en un filtro
+  colores = Object.fromEntries(escenarios.map((e, i) => [e, css(SERIES[i % SERIES.length])]));
+  document.getElementById("vivienda").textContent = v;
+  const sel = document.getElementById("escenario");
+  sel.innerHTML = escenarios.map(e => `<option value="${e}">${e} — ${nombre(e)}</option>`).join("");
+  const noBase = escenarios.find(e => !esBase(e));
+  if (noBase) sel.value = noBase;
+  pintar();
+}
+
+async function desdeServidor() {
+  try {
+    const nombres = await (await fetch("api/csv", { cache: "no-store" })).json();
+    const archivos = await Promise.all(nombres.map(async n =>
+      ({ nombre: n, texto: await (await fetch("datos/" + encodeURIComponent(n), { cache: "no-store" })).text() })));
+    cargar(archivos, nombres.length ? `${nombres.length} archivo(s) en datos/: ${nombres.join(", ")}` : "La carpeta datos/ no tiene CSV.");
+  } catch {
+    document.getElementById("fuente").textContent =
+      "No se encontró el servidor. Ejecuta  python dashboard/servidor.py  o usa «Abrir CSV sin servidor».";
+  }
+}
+const nombre = e => filas.find(r => r.escenario_id === e)?.escenario_nombre ?? e;
+const esBase = e => String(filas.find(r => r.escenario_id === e)?.es_base).toLowerCase().startsWith("s");
+const fila = (e, per) => filas.find(r => r.escenario_id === e && r.periodo === per);
+
+function pintar() {
+  const per = document.getElementById("periodo").value;
+  tabla(per); rango(per); tradeoff(per); mensual(document.getElementById("escenario").value);
+}
+
+function tabla(per) {
+  const rs = escenarios.map(e => fila(e, per)).filter(Boolean);
+  const r0 = rs[0];
+  document.getElementById("nota-tabla").textContent = per === "anual" ? "Todo el año." :
+    `${per === "mes_caliente" ? "Mes caliente" : "Mes frío"}: ${MES_NOMBRE[r0?.mes] ?? "?"} (según el clima). T exterior ${fmt(r0?.T_ext_min_C)} a ${fmt(r0?.T_ext_max_C)} °C.`;
+  // verde = mejora contra el base, rojo = empeora; siempre con signo, nunca solo color
+  const cls = (v, menorEsMejor = true) => v == null || isNaN(v) || v === 0 ? "" : ((v < 0) === menorEsMejor ? "mejor" : "peor");
+  document.getElementById("tabla").innerHTML = `
+    <tr><th>Escenario</th><th>T_op máx °C</th><th>Δ vs base</th><th>T_op mín °C</th><th>Δ vs base</th>
+    <th>Exceso máx °C</th><th>Déficit máx °C</th><th>HR máx %</th><th>HR mín %</th>
+    <th>Energía kWh</th><th>Δ energía</th><th>Carbono kgCO₂e</th></tr>` +
+    rs.map(r => `<tr>
+      <td><span class="dot" style="background:${colores[r.escenario_id]}"></span>${r.escenario_id} — ${r.escenario_nombre}${esBase(r.escenario_id) ? " (base)" : ""}</td>
+      <td>${fmt(r.T_op_max_C)}</td><td class="${cls(r.delta_T_op_max_C)}">${signo(r.delta_T_op_max_C)}</td>
+      <td>${fmt(r.T_op_min_C)}</td><td class="${cls(r.delta_T_op_min_C, false)}">${signo(r.delta_T_op_min_C)}</td>
+      <td>${fmt(r.max_exceso_sobre_limite_C)}</td><td>${fmt(r.max_deficit_bajo_limite_C)}</td>
+      <td>${fmt(r.HR_max_pct, 0)}</td><td>${fmt(r.HR_min_pct, 0)}</td>
+      <td>${fmt(r.energia_total_kWh, 0)}</td><td class="${cls(r.delta_energia_pct)}">${signo(r.delta_energia_pct, 0)} %</td>
+      <td>${fmt(r.carbono_kgCO2e, 0)}</td></tr>`).join("");
+}
+
+function base() {
+  const ink2 = css("--ink-2"), grid = css("--grid");
+  return {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: { legend: { labels: { color: ink2, usePointStyle: true, boxWidth: 8 } },
+               tooltip: { mode: "nearest", intersect: false } },
+    scales: { x: { ticks: { color: ink2 }, grid: { color: grid }, border: { color: css("--axis") } },
+              y: { ticks: { color: ink2 }, grid: { color: grid }, border: { color: css("--axis") } } }
+  };
+}
+function nuevo(id, cfg) { charts[id]?.destroy(); charts[id] = new Chart(document.getElementById(id), cfg); }
+
+function rango(per) {
+  const rs = escenarios.map(e => fila(e, per)).filter(Boolean);
+  const labels = rs.map(r => r.escenario_id);
+  const o = base();
+  o.indexAxis = "y";
+  o.scales.x.title = { display: true, text: "T operativa (°C)", color: css("--ink-2") };
+  const vals = rs.flatMap(r => [r.T_op_min_C, r.T_op_max_C, r.limite_inf_C, r.limite_sup_C]).filter(v => v != null && !isNaN(v));
+  o.scales.x.min = Math.floor(Math.min(...vals) - 2); o.scales.x.max = Math.ceil(Math.max(...vals) + 2);
+  o.plugins.legend.labels.filter = i => !i.text.startsWith("Límite inf");
+  o.plugins.tooltip = { callbacks: { label: c => c.dataset.type === "scatter"
+      ? `${c.dataset.label}: ${fmt(c.raw.x)} °C`
+      : `T_op: ${fmt(c.raw[0])} a ${fmt(c.raw[1])} °C` } };
+  nuevo("c-rango", { type: "bar", data: { labels, datasets: [
+    { label: "T_op mín → máx", data: rs.map(r => [r.T_op_min_C, r.T_op_max_C]),
+      backgroundColor: rs.map(r => colores[r.escenario_id]), borderRadius: 4, borderSkipped: false, barThickness: 14 },
+    { type: "scatter", label: "Límites ASHRAE 55", data: rs.map(r => ({ x: r.limite_sup_C, y: r.escenario_id })),
+      pointStyle: "line", rotation: 90, radius: 11, borderWidth: 3, borderColor: css("--ink"), backgroundColor: css("--ink") },
+    { type: "scatter", label: "Límite inf. ASHRAE", data: rs.map(r => ({ x: r.limite_inf_C, y: r.escenario_id })),
+      pointStyle: "line", rotation: 90, radius: 11, borderWidth: 3, borderColor: css("--ink"), backgroundColor: css("--ink") }
+  ] }, options: o });
+}
+
+function tradeoff(per) {
+  const rs = escenarios.map(e => fila(e, per)).filter(Boolean);
+  const o = base();
+  o.plugins.legend.display = true;
+  o.scales.x.title = { display: true, text: "Energía total (kWh)", color: css("--ink-2") };
+  o.scales.y.title = { display: true, text: "Exceso + déficit máx (°C)", color: css("--ink-2") };
+  o.scales.y.beginAtZero = true; o.scales.x.beginAtZero = true;
+  o.plugins.tooltip = { callbacks: { label: c => { const r = rs[c.datasetIndex];
+    return [`${r.escenario_id} — ${r.escenario_nombre}`, `Exceso ${fmt(r.max_exceso_sobre_limite_C)} °C · Déficit ${fmt(r.max_deficit_bajo_limite_C)} °C`, `Energía ${fmt(r.energia_total_kWh, 0)} kWh`]; } } };
+  nuevo("c-tradeoff", { type: "scatter", data: { datasets: rs.map(r => ({
+    label: r.escenario_id, data: [{ x: r.energia_total_kWh, y: (r.max_exceso_sobre_limite_C || 0) + (r.max_deficit_bajo_limite_C || 0) }],
+    backgroundColor: colores[r.escenario_id], borderColor: css("--surface"), borderWidth: 2, radius: 7, hoverRadius: 9 })) }, options: o });
+}
+
+function mensual(e) {
+  document.getElementById("titulo-mensual").textContent = `${e} — ${nombre(e)}`;
+  const eb = escenarios.find(esBase);
+  const serie = (id, c) => MESES.map(m => fila(id, m)?.[c] ?? null);
+  const col = colores[e], gris = css("--muted");
+  const o = base();
+  o.interaction = { mode: "index", intersect: false };
+  o.plugins.tooltip = { mode: "index", intersect: false, callbacks: { label: c => `${c.dataset.label}: ${fmt(c.raw)} °C` } };
+  o.scales.y.title = { display: true, text: "°C", color: css("--ink-2") };
+  const ds = [
+    { label: "Rango ASHRAE 55", data: serie(e, "limite_sup_C"), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: css("--band") },
+    { label: "Límite inf. ASHRAE", data: serie(e, "limite_inf_C"), borderColor: "transparent", pointRadius: 0, fill: false },
+    { label: "T_op máx", data: serie(e, "T_op_max_C"), borderColor: col, backgroundColor: col, borderWidth: 2, pointRadius: 3 },
+    { label: "T_op mín", data: serie(e, "T_op_min_C"), borderColor: col, backgroundColor: col, borderWidth: 2, pointRadius: 3, pointStyle: "rectRot" },
+  ];
+  if (eb && eb !== e) ds.push(
+    { label: "Base máx", data: serie(eb, "T_op_max_C"), borderColor: gris, borderDash: [5, 4], borderWidth: 2, pointRadius: 0 },
+    { label: "Base mín", data: serie(eb, "T_op_min_C"), borderColor: gris, borderDash: [5, 4], borderWidth: 2, pointRadius: 0 });
+  o.plugins.legend.labels.filter = i => !i.text.startsWith("Límite inf");
+  nuevo("c-mensual", { type: "line", data: { labels: MESES, datasets: ds }, options: o });
+}
+
+document.getElementById("periodo").onchange = pintar;
+document.getElementById("escenario").onchange = e => mensual(e.target.value);
+document.getElementById("sel-vivienda").onchange = e => seleccionar(e.target.value);
+document.getElementById("recargar").onclick = desdeServidor;
+document.getElementById("archivo").onchange = async ev => {
+  const fs = [...ev.target.files]; if (!fs.length) return;
+  const archivos = await Promise.all(fs.map(async f => ({ nombre: f.name, texto: await f.text() })));
+  cargar(archivos.sort((a, b) => a.nombre.localeCompare(b.nombre)), `Archivo(s) abiertos: ${fs.map(f => f.name).join(", ")}`);
+};
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => filas.length && seleccionar(document.getElementById("sel-vivienda").value));
+desdeServidor();
+</script>
+</body>
+</html>
