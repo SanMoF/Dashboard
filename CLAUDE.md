@@ -12,6 +12,7 @@ Layout:
 - `datos/` — output CSVs. The dashboard reads **every** `.csv` here (any number of dwellings); `_log.md` files are ignored by it.
 - `dashboard/index.html` — static page (Chart.js + PapaParse from cdnjs). `dashboard/servidor.py` (stdlib only) serves it plus `/api/csv` (list of CSVs in `datos/`) and `/datos/<file>.csv`. Without the server the page only works via its multi-file picker.
 - `docs/metodologia_calculo.md` — every formula (ASHRAE 55 adaptive), step by step, mapped to script functions, with assumptions/limitations. Update it whenever a calculation changes.
+- `docs/diccionario_variables.md` — every input/output variable: meaning, unit, origin (user/simulator/climate/computed + formula) and valid values. Update it whenever a column or input changes.
 - `docs/contexto_esquema_confort.md` — decision history (v1–v9), column list, calculation logic, open questions. Read before changing the schema.
 - `.claude/skills/esquema-confort-termico/` — project-local skill. Its `scripts/` and context copy are synced from `backend/` and `docs/` by `python herramientas/empaquetar_skill.py`, which also builds `dist/esquema-confort-termico.skill` (gitignored). Run it after editing either source.
 
@@ -31,7 +32,7 @@ The ASHRAE 55 formulas are hand-written in the script on purpose; `pythermalcomf
 
 Flow: simulator results per scenario, one row per month (+ optional `anual`) with `T_operativa_C`, `HR_pct`, energy → monthly climate (`leer_clima`, EPW or `--clima`: T_ext max/min/mean) → prevailing mean = monthly outdoor mean → `limites` per month → exceedance/deficit = T_op − limit → annual row (simulator's annual T_op, no limits, worst-month exceedance/deficit, energy = sum of months) → deltas vs. the single `es_base` scenario.
 
-Output is one long-format CSV per run, one row = scenario × periodo (15 per scenario), 30 columns fixed by `COLUMNAS`. `nivel=clave` rows (`anual`, `mes_caliente`, `mes_frio`) and `nivel=mes` rows overlap and must never be summed. Changing the schema means updating `COLUMNAS`, the skill's column dictionary, the context doc, and the dashboard (`REQUERIDAS` and the fields it reads). The dashboard merges all CSVs keyed by `vivienda_id × escenario_id × periodo` (later file alphabetically wins) and colors scenarios by their order in the data, never by filter position.
+Output is one long-format CSV per run, one row = scenario × periodo (15 per scenario), 30 columns fixed by `COLUMNAS`. `nivel=clave` rows (`anual`, `mes_caliente`, `mes_frio`) and `nivel=mes` rows overlap and must never be summed. Changing the schema means updating `COLUMNAS`, `docs/diccionario_variables.md`, the skill's column dictionary, the context doc, and the dashboard (`REQUERIDAS` and the fields it reads). The dashboard merges all CSVs keyed by `vivienda_id × escenario_id × periodo` (later file alphabetically wins) and colors scenarios by their order in the data, never by filter position.
 
 Rules that must be preserved:
 - Comfort is ALWAYS measured with ASHRAE 55 adaptive; it is not configurable. PMV/PPD may only be a complementary addition.

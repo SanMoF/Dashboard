@@ -25,6 +25,7 @@ Proyecto de becario dentro del proyecto SECIHTI de descarbonización de vivienda
 Una fila del CSV = escenario × periodo (15 filas por escenario). Documentación detallada:
 
 - [`docs/metodologia_calculo.md`](docs/metodologia_calculo.md): **todas las fórmulas** (ASHRAE 55 adaptativo), paso a paso, con un ejemplo numérico, supuestos y limitaciones. Las fórmulas están escritas en el propio script; la única librería de confort, `pythermalcomfort`, solo se usa para verificarlas (`python backend/pruebas/validar_ashrae55.py`).
+- [`docs/diccionario_variables.md`](docs/diccionario_variables.md): **cada variable** de entrada y de salida: qué es, unidad, de dónde viene (usuario, simulador, clima o calculada, con su fórmula) y qué valores admite.
 - [`docs/contexto_esquema_confort.md`](docs/contexto_esquema_confort.md): las 30 columnas y el historial de decisiones del esquema.
 
 ## Estructura

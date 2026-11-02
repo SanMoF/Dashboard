@@ -46,6 +46,8 @@ Formato: UTF-8, separador coma, punto decimal, encabezados en snake_case sin ace
 
 ### Diccionario de columnas
 
+Versión completa, con entradas, origen de cada variable, fórmulas y valores admitidos: `diccionario_variables.md` (en el repositorio: `docs/diccionario_variables.md`).
+
 | Columna | Unidad | Regla / fuente |
 |---|---|---|
 | vivienda_id | — | config (PUE-01) |
@@ -124,4 +126,4 @@ Detalle completo, con ejemplo numérico y limitaciones: `metodologia_calculo.md`
 
 ## 8. Mejora continua
 
-Si un cambio al esquema se acuerda con el usuario: actualiza `COLUMNAS` y el diccionario, sube la versión (v9 → v10) en el docstring y registra el cambio en el MD de contexto del proyecto (`docs/contexto_esquema_confort.md`), en la sección de historial, y vuelve a empaquetar la skill.
+Si un cambio al esquema se acuerda con el usuario: actualiza `COLUMNAS`, el diccionario de esta skill y `docs/diccionario_variables.md`, sube la versión (v9 → v10) en el docstring y registra el cambio en el MD de contexto del proyecto (`docs/contexto_esquema_confort.md`), en la sección de historial, y vuelve a empaquetar la skill.
